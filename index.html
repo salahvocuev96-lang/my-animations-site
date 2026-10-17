@@ -3,22 +3,504 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Мой сайт с анимациями</title>
+    <title>Ripple Distortion Effect</title>
     <style>
-        body {
+        * {
             margin: 0;
             padding: 0;
-            font-family: -apple-system, sans-serif;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: #0a0a0a;
-            color: #fff;
-            min-height: 100vh;
             display: flex;
-            align-items: center;
             justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        .ripple-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
         }
     </style>
 </head>
 <body>
-    <h1>Привет! Это мой новый сайт </h1>
+
+    <div class="ripple-container" id="rippleContainer">
+        <canvas id="rippleCanvas"></canvas>
+    </div>
+
+    <script>
+        const CONFIG = {
+            src: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop',
+            brushSize: 150,
+            strength: 0.2,
+            swirl: 1,
+            rings: 4,
+            spread: 5,
+            fade: 3,
+            spacing: 15,
+            dispersion: 0,
+            glint: 0,
+            tint: '#a855f7',
+            tintAmount: 0.1,
+            grayscale: true,
+            highlightColor: '#ffffff',
+            trigger: 'hover',
+            clickStrength: 2,
+            quality: 'low'
+        };
+
+        const MAX_WAVES = 100;
+        const QUALITY_SCALE = { low: 0.4, medium: 0.7, high: 1 };
+        const START_SCALE = 1.5;
+        const LIFE_CONSTANT = Math.log(500);
+
+        const waveVertexShader = `
+            precision highp float;
+            attribute vec2 position;
+            attribute vec2 uv;
+            attribute vec2 iOffset;
+            attribute vec2 iScale;
+            attribute float iOpacity;
+            varying vec2 vUv;
+            varying float vOpacity;
+            void main() {
+                vUv = uv;
+                vOpacity = iOpacity;
+                gl_Position = vec4(iOffset + position * iScale, 0.0, 1.0);
+            }
+        `;
+
+        const waveFragmentShader = `
+            precision highp float;
+            varying vec2 vUv;
+            varying float vOpacity;
+            uniform float uRings;
+            const float PI = 3.141592653589793;
+            const float EDGE = 0.006737947;
+            void main() {
+                vec2 p = vUv * 2.0 - 1.0;
+                float r = dot(p, p);
+                if (r > 1.0) discard;
+                float brush = (exp(-r * 5.0) - EDGE) / (1.0 - EDGE);
+                brush *= 0.55 + 0.45 * cos(sqrt(r) * PI * 2.0 * uRings);
+                gl_FragColor = vec4(vec3(brush * vOpacity * vOpacity), 1.0);
+            }
+        `;
+
+        const screenVertexShader = `
+            precision highp float;
+            attribute vec2 position;
+            attribute vec2 uv;
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const compositeFragmentShader = `
+            precision highp float;
+            varying vec2 vUv;
+            uniform sampler2D uTexture;
+            uniform sampler2D uDisplacement;
+            uniform vec2 uResolution;
+            uniform vec2 uTextureSize;
+            uniform vec2 uTexel;
+            uniform vec3 uTint;
+            uniform vec3 uHighlight;
+            uniform float uStrength;
+            uniform float uSwirl;
+            uniform float uDispersion;
+            uniform float uGlint;
+            uniform float uTintAmount;
+            uniform float uGrayscale;
+            const float TAU = 6.283185307179586;
+            vec2 coverUV(vec2 uv) {
+                vec2 safe = max(uTextureSize, vec2(1.0));
+                vec2 s = uResolution / safe;
+                vec2 scaledSize = safe * max(s.x, s.y);
+                vec2 offset = (uResolution - scaledSize) * 0.5;
+                return (uv * uResolution - offset) / scaledSize;
+            }
+            void main() {
+                float amount = texture2D(uDisplacement, vUv).r;
+                vec2 base = coverUV(vUv);
+                float theta = amount * uSwirl * TAU;
+                vec2 dir = vec2(sin(theta), cos(theta));
+                vec2 push = dir * amount * uStrength;
+                vec3 color;
+                if (uDispersion > 0.001) {
+                    float split = uDispersion * 0.25;
+                    color.r = texture2D(uTexture, base + push * (1.0 + split)).r;
+                    color.g = texture2D(uTexture, base + push).g;
+                    color.b = texture2D(uTexture, base + push * (1.0 - split)).b;
+                } else {
+                    color = texture2D(uTexture, base + push).rgb;
+                }
+                if (uGrayscale > 0.001) {
+                    color = mix(color, vec3(dot(color, vec3(0.2126, 0.7152, 0.0722))), uGrayscale);
+                }
+                if (uTintAmount > 0.001) {
+                    color = mix(color, color * uTint * 1.9, clamp(amount * 1.6, 0.0, 1.0) * uTintAmount);
+                }
+                if (uGlint > 0.001) {
+                    float ex = texture2D(uDisplacement, vUv + vec2(uTexel.x, 0.0)).r - texture2D(uDisplacement, vUv - vec2(uTexel.x, 0.0)).r;
+                    float ey = texture2D(uDisplacement, vUv + vec2(0.0, uTexel.y)).r - texture2D(uDisplacement, vUv - vec2(0.0, uTexel.y)).r;
+                    vec3 normal = normalize(vec3(-ex * 26.0, -ey * 26.0, 1.0));
+                    vec3 light = normalize(vec3(-0.35, 0.55, 1.0));
+                    float raw = pow(max(dot(normal, light), 0.0), 22.0);
+                    float flatSpec = pow(max(light.z, 0.0), 22.0);
+                    color += uHighlight * clamp((raw - flatSpec) / max(1.0 - flatSpec, 0.0001), 0.0, 1.0) * uGlint;
+                }
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `;
+
+        function hexToRGB(hex) {
+            const clean = hex.replace('#', '');
+            const full = clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean;
+            const n = parseInt(full, 16);
+            if (Number.isNaN(n)) return [1, 1, 1];
+            return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+        }
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vertexShader, fragmentShader) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program error:', gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        const container = document.getElementById('rippleContainer');
+        const canvas = document.getElementById('rippleCanvas');
+        const gl = canvas.getContext('webgl', { alpha: false, antialias: false });
+
+        if (!gl) {
+            console.error('WebGL not supported');
+            document.body.innerHTML = '<h1 style="color:white;text-align:center;padding:50px;">WebGL не поддерживается</h1>';
+        }
+
+        gl.clearColor(0, 0, 0, 1);
+
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        let imageLoaded = false;
+        let imageWidth = 1, imageHeight = 1;
+
+        image.onload = () => {
+            imageLoaded = true;
+            imageWidth = image.naturalWidth || 1;
+            imageHeight = image.naturalHeight || 1;
+            gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        };
+        image.src = CONFIG.src;
+
+        const imageTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const waveVert = createShader(gl, gl.VERTEX_SHADER, waveVertexShader);
+        const waveFrag = createShader(gl, gl.FRAGMENT_SHADER, waveFragmentShader);
+        const waveProgram = createProgram(gl, waveVert, waveFrag);
+
+        const screenVert = createShader(gl, gl.VERTEX_SHADER, screenVertexShader);
+        const compositeFrag = createShader(gl, gl.FRAGMENT_SHADER, compositeFragmentShader);
+        const compositeProgram = createProgram(gl, screenVert, compositeFrag);
+
+        const positions = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+        const uvs = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);
+        const offsets = new Float32Array(MAX_WAVES * 2);
+        const scales = new Float32Array(MAX_WAVES * 2);
+        const opacities = new Float32Array(MAX_WAVES);
+
+        const posBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        const uvBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW);
+
+        const offsetBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, offsets, gl.DYNAMIC_DRAW);
+
+        const scaleBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, scales, gl.DYNAMIC_DRAW);
+
+        const opacityBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, opacityBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, opacities, gl.DYNAMIC_DRAW);
+
+        const screenPositions = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+        const screenUVs = new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]);
+
+        const screenPosBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, screenPosBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, screenPositions, gl.STATIC_DRAW);
+
+        const screenUVBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, screenUVBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, screenUVs, gl.STATIC_DRAW);
+
+        const displacementTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, displacementTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const displacementFramebuffer = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, displacementFramebuffer);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, displacementTexture, 0);
+
+        const scale = QUALITY_SCALE[CONFIG.quality] || QUALITY_SCALE.high;
+        const fieldW = Math.max(2, Math.round(width * scale));
+        const fieldH = Math.max(2, Math.round(height * scale));
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldW, fieldH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        const waves = Array.from({ length: MAX_WAVES }, () => ({
+            x: 0, y: 0, scale: START_SCALE, target: START_SCALE, size: 1, opacity: 0
+        }));
+        let currentWave = 0;
+
+        const waveUniforms = {
+            uRings: gl.getUniformLocation(waveProgram, 'uRings')
+        };
+
+        const compositeUniforms = {
+            uTexture: gl.getUniformLocation(compositeProgram, 'uTexture'),
+            uDisplacement: gl.getUniformLocation(compositeProgram, 'uDisplacement'),
+            uResolution: gl.getUniformLocation(compositeProgram, 'uResolution'),
+            uTextureSize: gl.getUniformLocation(compositeProgram, 'uTextureSize'),
+            uTexel: gl.getUniformLocation(compositeProgram, 'uTexel'),
+            uTint: gl.getUniformLocation(compositeProgram, 'uTint'),
+            uHighlight: gl.getUniformLocation(compositeProgram, 'uHighlight'),
+            uStrength: gl.getUniformLocation(compositeProgram, 'uStrength'),
+            uSwirl: gl.getUniformLocation(compositeProgram, 'uSwirl'),
+            uDispersion: gl.getUniformLocation(compositeProgram, 'uDispersion'),
+            uGlint: gl.getUniformLocation(compositeProgram, 'uGlint'),
+            uTintAmount: gl.getUniformLocation(compositeProgram, 'uTintAmount'),
+            uGrayscale: gl.getUniformLocation(compositeProgram, 'uGrayscale')
+        };
+
+        function setNewWave(x, y, power) {
+            const wave = waves[currentWave];
+            currentWave = (currentWave + 1) % MAX_WAVES;
+            wave.x = x;
+            wave.y = y;
+            wave.scale = START_SCALE * power;
+            wave.target = START_SCALE * Math.max(1, CONFIG.spread) * power;
+            wave.size = Math.max(1, CONFIG.brushSize);
+            wave.opacity = 1;
+        }
+
+        function localPoint(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return null;
+            if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+                return null;
+            }
+            return [clientX - rect.left, rect.height - (clientY - rect.top)];
+        }
+
+        let previousX = 0, previousY = 0;
+
+        canvas.addEventListener('pointermove', (event) => {
+            if (CONFIG.trigger === 'click') return;
+            const point = localPoint(event.clientX, event.clientY);
+            if (!point) return;
+            const step = Math.max(1, CONFIG.spacing);
+            if (Math.abs(point[0] - previousX) > step || Math.abs(point[1] - previousY) > step) {
+                setNewWave(point[0], point[1], 1);
+                previousX = point[0];
+                previousY = point[1];
+            }
+        }, { passive: true });
+
+        canvas.addEventListener('pointerdown', (event) => {
+            if (CONFIG.trigger === 'hover') return;
+            const point = localPoint(event.clientX, event.clientY);
+            if (!point) return;
+            setNewWave(point[0], point[1], Math.max(1, CONFIG.clickStrength));
+        }, { passive: true });
+
+        let previousTime = 0;
+
+        function render(now) {
+            requestAnimationFrame(render);
+
+            const delta = previousTime ? Math.min(0.05, (now - previousTime) / 1000) : 0;
+            previousTime = now;
+
+            const growth = 1 - Math.exp(-delta * 1.09);
+            const decay = Math.exp((-delta * LIFE_CONSTANT) / Math.max(0.15, CONFIG.fade));
+
+            for (let i = 0; i < MAX_WAVES; i++) {
+                const wave = waves[i];
+                if (wave.opacity <= 0) {
+                    opacities[i] = 0;
+                    continue;
+                }
+
+                wave.opacity *= decay;
+                wave.scale += (wave.target - wave.scale) * growth;
+
+                if (wave.opacity < 0.002) {
+                    wave.opacity = 0;
+                    opacities[i] = 0;
+                    continue;
+                }
+
+                const half = (wave.scale * wave.size) / 2;
+                offsets[i * 2] = (wave.x / width) * 2 - 1;
+                offsets[i * 2 + 1] = (wave.y / height) * 2 - 1;
+                scales[i * 2] = (half / width) * 2;
+                scales[i * 2 + 1] = (half / height) * 2;
+                opacities[i] = wave.opacity;
+            }
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, displacementFramebuffer);
+            gl.viewport(0, 0, fieldW, fieldH);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.useProgram(waveProgram);
+            gl.uniform1f(waveUniforms.uRings, CONFIG.rings);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+            const posLoc = gl.getAttribLocation(waveProgram, 'position');
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+            const uvLoc = gl.getAttribLocation(waveProgram, 'uv');
+            gl.enableVertexAttribArray(uvLoc);
+            gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, offsetBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, offsets, gl.DYNAMIC_DRAW);
+            const offsetLoc = gl.getAttribLocation(waveProgram, 'iOffset');
+            gl.enableVertexAttribArray(offsetLoc);
+            gl.vertexAttribPointer(offsetLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, scales, gl.DYNAMIC_DRAW);
+            const scaleLoc = gl.getAttribLocation(waveProgram, 'iScale');
+            gl.enableVertexAttribArray(scaleLoc);
+            gl.vertexAttribPointer(scaleLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, opacityBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, opacities, gl.DYNAMIC_DRAW);
+            const opacityLoc = gl.getAttribLocation(waveProgram, 'iOpacity');
+            gl.enableVertexAttribArray(opacityLoc);
+            gl.vertexAttribPointer(opacityLoc, 1, gl.FLOAT, false, 0, 0);
+
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.ONE, gl.ONE);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, MAX_WAVES);
+            gl.disable(gl.BLEND);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, width, height);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.useProgram(compositeProgram);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+            gl.uniform1i(compositeUniforms.uTexture, 0);
+
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, displacementTexture);
+            gl.uniform1i(compositeUniforms.uDisplacement, 1);
+
+            gl.uniform2f(compositeUniforms.uResolution, width, height);
+            gl.uniform2f(compositeUniforms.uTextureSize, imageWidth, imageHeight);
+            gl.uniform2f(compositeUniforms.uTexel, 1 / fieldW, 1 / fieldH);
+
+            const tintRGB = hexToRGB(CONFIG.tint);
+            gl.uniform3f(compositeUniforms.uTint, tintRGB[0], tintRGB[1], tintRGB[2]);
+
+            const highlightRGB = hexToRGB(CONFIG.highlightColor);
+            gl.uniform3f(compositeUniforms.uHighlight, highlightRGB[0], highlightRGB[1], highlightRGB[2]);
+
+            gl.uniform1f(compositeUniforms.uStrength, CONFIG.strength);
+            gl.uniform1f(compositeUniforms.uSwirl, CONFIG.swirl);
+            gl.uniform1f(compositeUniforms.uDispersion, CONFIG.dispersion);
+            gl.uniform1f(compositeUniforms.uGlint, CONFIG.glint);
+            gl.uniform1f(compositeUniforms.uTintAmount, CONFIG.tintAmount);
+            gl.uniform1f(compositeUniforms.uGrayscale, CONFIG.grayscale ? 1 : 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, screenPosBuffer);
+            const screenPosLoc = gl.getAttribLocation(compositeProgram, 'position');
+            gl.enableVertexAttribArray(screenPosLoc);
+            gl.vertexAttribPointer(screenPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, screenUVBuffer);
+            const screenUVLoc = gl.getAttribLocation(compositeProgram, 'uv');
+            gl.enableVertexAttribArray(screenUVLoc);
+            gl.vertexAttribPointer(screenUVLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        requestAnimationFrame(render);
+
+        window.addEventListener('resize', () => {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+
+            const scale = QUALITY_SCALE[CONFIG.quality] || QUALITY_SCALE.high;
+            const fieldW = Math.max(2, Math.round(width * scale));
+            const fieldH = Math.max(2, Math.round(height * scale));
+
+            gl.bindTexture(gl.TEXTURE_2D, displacementTexture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, fieldW, fieldH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        });
+    </script>
+
 </body>
 </html>
